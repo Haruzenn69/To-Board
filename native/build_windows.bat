@@ -15,8 +15,9 @@ if errorlevel 1 goto :fail
 
 echo.
 echo Built: %~dp0build\touchpad-helper.exe
-echo Listen mode (phone via adb reverse):
-echo   touchpad-helper.exe --listen 4321
+echo Listen mode:
+echo   USB phone (adb reverse):  touchpad-helper.exe --listen 4321
+echo   Hotspot/LAN:              touchpad-helper.exe --listen 4321 --host 0.0.0.0
 exit /b 0
 
 :fail

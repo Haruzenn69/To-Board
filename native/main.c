@@ -1203,7 +1203,7 @@ emit_connected(void)
 }
 
 static int
-listen_setup(const char *port_str)
+listen_setup(const char *port_str, const char *host_str)
 {
     int port = atoi(port_str);
     if (port <= 0 || port > 65535)
@@ -1215,7 +1215,9 @@ listen_setup(const char *port_str)
     (void)setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
     struct sockaddr_in sa = {0};
     sa.sin_family = AF_INET;
-    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    /* default loopback-only; "0.0.0.0" or a LAN IP serves the phone over
+     * hotspot/wifi directly (see README). inet_addr("0.0.0.0") == INADDR_ANY. */
+    sa.sin_addr.s_addr = inet_addr(host_str);
     sa.sin_port = htons((uint16_t)port);
     if (bind(fd, (struct sockaddr *)&sa, sizeof sa) < 0 ||
         listen(fd, 1) < 0) {
@@ -1315,9 +1317,14 @@ main(int argc, char **argv)
     signal(SIGPIPE, SIG_IGN);
 
     int listen_port_fd = -1;
+    const char *host = "127.0.0.1"; /* default: loopback only (safe) */
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--host") == 0 && i + 1 < argc)
+            host = argv[++i]; /* "0.0.0.0" = reachable from LAN/hotspot */
+    }
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--listen") == 0 && i + 1 < argc) {
-            listen_port_fd = listen_setup(argv[++i]);
+            listen_port_fd = listen_setup(argv[++i], host);
             if (listen_port_fd < 0) {
                 fprintf(stderr, "error: cannot listen on port %s\n", argv[i]);
                 return 2;
@@ -1385,7 +1392,8 @@ main(int argc, char **argv)
 done:
     if (listen_port_fd >= 0) {
         listen_fd = listen_port_fd;
-        fprintf(stderr, "listening on 127.0.0.1 (from phone: adb reverse tcp:PORT tcp:PORT)\n");
+        fprintf(stderr, "listening on %s (default 127.0.0.1 = adb reverse; "
+                "--host 0.0.0.0 = hotspot/LAN)\n", host);
     }
     run_loop();
     return 0;

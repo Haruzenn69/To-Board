@@ -5,7 +5,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:material_ui/material_ui.dart' as mui;
 
+import 'src/host_scanner.dart';
 import 'src/keyboard_surface.dart';
+import 'src/settings_store.dart';
 import 'src/touchpad_engine.dart';
 import 'src/touchpad_settings.dart';
 import 'src/touchpad_surface.dart';
@@ -124,14 +126,25 @@ class _TouchpadHomeState extends State<TouchpadHome> {
   @override
   void initState() {
     super.initState();
-    // Phone talks to the daemon on the laptop over `adb reverse tcp:4321
-    // tcp:4321`, which tunnels 127.0.0.1:4321 straight to the laptop.
+    // Phone talks to the daemon on the laptop. Default: localhost over
+    // `adb reverse tcp:4321 tcp:4321`. If a serverHost was saved (LAN/hotspot
+    // mode) the phone connects directly to the laptop's LAN address instead.
     _engine = TouchpadEngine(
       host: _isAndroid ? '127.0.0.1' : null,
       port: _isAndroid ? 4321 : null,
     );
     _engine.states.listen(_onState);
-    _engine.start();
+    _restoreSettingsAndConnect();
+  }
+
+  Future<void> _restoreSettingsAndConnect() async {
+    final saved = await SettingsStore.load();
+    if (!mounted) return;
+    setState(() => _settings = saved);
+    if (_isAndroid && saved.serverHost.isNotEmpty) {
+      _engine.host = saved.serverHost;
+    }
+    await _engine.start();
   }
 
   void _onState(EngineState s) {
@@ -144,11 +157,21 @@ class _TouchpadHomeState extends State<TouchpadHome> {
       context: context,
       backgroundColor: cs.surfaceContainerLow,
       showDragHandle: true,
+      isScrollControlled: true,
       builder: (ctx) => _SettingsSheet(initial: _settings),
     );
-    if (updated != null && mounted) {
-      setState(() => _settings = updated);
-    }
+    if (updated == null || !mounted) return;
+    final hostChanged = updated.serverHost != _settings.serverHost;
+    setState(() {
+      _settings = updated;
+      if (_isAndroid) {
+        _engine.host = updated.serverHost.isEmpty
+            ? '127.0.0.1'
+            : updated.serverHost;
+      }
+    });
+    SettingsStore.save(updated);
+    if (hostChanged) await _engine.restart();
   }
 
   @override
@@ -325,40 +348,167 @@ class _SettingsSheetState extends State<_SettingsSheet> {
     return SafeArea(
       child: Padding(
         padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  Text(
+                    'Touchpad settings',
+                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                          fontWeight: FontWeight.w700,
+                        ),
+                  ),
+                  const Spacer(),
+                  TextButton(onPressed: _done, child: const Text('Done')),
+                ],
+              ),
+              _Slider('Cursor sensitivity', _s.cursorSensitivity, 0.5, 6.0,
+                  0.1, '%.1fx',
+                  (v) => setState(() => _s = _s.copyWith(cursorSensitivity: v))),
+              _Slider('Scroll speed', _s.scrollScale, 0.25, 3.0, 0.25, '%.2fx',
+                  (v) => setState(() => _s = _s.copyWith(scrollScale: v))),
+              _Switch('Natural scroll', _s.naturalScroll, 'Content follows the '
+                  'fingers (finger down scrolls down)',
+                  (v) => setState(() => _s = _s.copyWith(naturalScroll: v))),
+              _Switch('3-finger gestures', _s.multiFingerGestures,
+                  'Tap = middle click · swipe = task view / app switch',
+                  (v) =>
+                      setState(() => _s = _s.copyWith(multiFingerGestures: v))),
+              _Switch('Double-tap drag', _s.dragLock,
+                  'Double-tap and hold to drag',
+                  (v) => setState(() => _s = _s.copyWith(dragLock: v))),
+              const SizedBox(height: 8),
+              _HostField(
+                initial: _s.serverHost,
+                onChanged: (v) => setState(() => _s = _s.copyWith(serverHost: v)),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _HostField extends StatefulWidget {
+  const _HostField({required this.initial, required this.onChanged});
+
+  final String initial;
+  final ValueChanged<String> onChanged;
+
+  @override
+  State<_HostField> createState() => _HostFieldState();
+}
+
+class _HostFieldState extends State<_HostField> {
+  late final TextEditingController _c = TextEditingController(text: widget.initial);
+  bool _scanning = false;
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  Future<void> _scan() async {
+    setState(() => _scanning = true);
+    final t0 = DateTime.now();
+    final hits = await scanForDaemon();
+    if (!mounted) return;
+    setState(() => _scanning = false);
+    final elapsed = DateTime.now().difference(t0).inSeconds;
+    if (hits.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('No laptop found (scanned '
+              '${elapsed}s). Is touchpad-helper running with --host 0.0.0.0 '
+              'and port 4321 open in Windows Firewall?'),
+        ),
+      );
+      return;
+    }
+    if (hits.length == 1) {
+      _apply(hits.first);
+      return;
+    }
+    final pick = await showModalBottomSheet<String>(
+      context: context,
+      builder: (ctx) => SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Row(
-              children: [
-                Text(
-                  'Touchpad settings',
-                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.w700,
-                      ),
-                ),
-                const Spacer(),
-                TextButton(onPressed: _done, child: const Text('Done')),
-              ],
+            const Padding(
+              padding: EdgeInsets.all(12),
+              child: Text('Found laptops', style: TextStyle(fontWeight: FontWeight.w700)),
             ),
-            _Slider('Cursor sensitivity', _s.cursorSensitivity, 0.5, 6.0,
-                0.1, '%.1fx',
-                (v) => setState(() => _s = _s.copyWith(cursorSensitivity: v))),
-            _Slider('Scroll speed', _s.scrollScale, 0.25, 3.0, 0.25, '%.2fx',
-                (v) => setState(() => _s = _s.copyWith(scrollScale: v))),
-            _Switch('Natural scroll', _s.naturalScroll, 'Content follows the '
-                'fingers (finger down scrolls down)',
-                (v) => setState(() => _s = _s.copyWith(naturalScroll: v))),
-            _Switch('3-finger gestures', _s.multiFingerGestures,
-                'Tap = middle click · swipe = task view / app switch',
-                (v) =>
-                    setState(() => _s = _s.copyWith(multiFingerGestures: v))),
-            _Switch('Double-tap drag', _s.dragLock,
-                'Double-tap and hold to drag',
-                (v) => setState(() => _s = _s.copyWith(dragLock: v))),
+            for (final h in hits)
+              ListTile(
+                title: Text(h),
+                onTap: () => Navigator.of(ctx).pop(h),
+              ),
           ],
         ),
       ),
+    );
+    if (pick != null) _apply(pick);
+  }
+
+  void _apply(String host) {
+    _c.text = host;
+    widget.onChanged(host);
+    setState(() {});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text('Daemon (laptop IP)',
+            style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
+        const SizedBox(height: 6),
+        Row(
+          children: [
+            Expanded(
+              child: TextField(
+                controller: _c,
+                keyboardType: TextInputType.text,
+                decoration: InputDecoration(
+                  isDense: true,
+                  hintText: 'Blank = adb reverse (USB)',
+                  border: const OutlineInputBorder(),
+                ),
+                onChanged: widget.onChanged,
+              ),
+            ),
+            const SizedBox(width: 8),
+            SizedBox(
+              height: 40,
+              child: OutlinedButton.icon(
+                onPressed: _scanning ? null : _scan,
+                icon: _scanning
+                    ? SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: cs.primary),
+                      )
+                    : const Icon(Icons.search, size: 16),
+                label: const Text('Scan'),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 4),
+        Text(
+          'Connect via hotspot/LAN. Empty uses a USB-connected phone via adb reverse.',
+          style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
+        ),
+      ],
     );
   }
 }

@@ -631,9 +631,12 @@ main(int argc, char **argv)
 
     SOCKET listen_sock = INVALID_SOCKET;
     const char *port = NULL;
+    const char *host = "127.0.0.1"; /* default: loopback only (safe) */
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--listen") == 0 && i + 1 < argc)
             port = argv[++i];
+        else if (strcmp(argv[i], "--host") == 0 && i + 1 < argc)
+            host = argv[++i]; /* "0.0.0.0" = reachable from LAN/hotspot */
     }
 
     if (port != NULL) {
@@ -657,7 +660,7 @@ main(int argc, char **argv)
                    sizeof one);
         struct sockaddr_in sa = {0};
         sa.sin_family = AF_INET;
-        sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        sa.sin_addr.s_addr = inet_addr(host);
         sa.sin_port = htons((unsigned short)pnum);
         if (bind(listen_sock, (struct sockaddr *)&sa, sizeof sa) == SOCKET_ERROR ||
             listen(listen_sock, 1) == SOCKET_ERROR) {
@@ -665,9 +668,9 @@ main(int argc, char **argv)
             closesocket(listen_sock);
             return 2;
         }
-        fprintf(stderr,
-                "listening on 127.0.0.1 (from phone: adb reverse tcp:%s "
-                "tcp:%s)\n", port, port);
+        fprintf(stderr, "listening on %s:%s (LAN mode: phone connects to "
+                "this IP; loopback-only adb reverse keeps working)\n",
+                host, port);
     }
 
     if (listen_sock == INVALID_SOCKET) {
