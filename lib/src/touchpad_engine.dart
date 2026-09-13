@@ -370,15 +370,11 @@ class TouchpadEngine {
 
   void key(int code, bool down) => sendLine('k $code ${down ? 1 : 0}');
 
-  /// Tap a key chord (e.g. Alt+Tab) as a single burst: press every key, then
-  /// release them in reverse order. Used by multi-finger swipe gestures.
+  /// Tap a key chord (e.g. Alt+Tab) as a single atomic daemon-side burst:
+  /// presses and releases are bundled in one 'ch' line so a lost packet can
+  /// never leave a modifier stuck. Used by multi-finger swipe gestures.
   void chord(Iterable<int> codes) {
-    for (final c in codes) {
-      key(c, true);
-    }
-    for (final c in codes.toList().reversed) {
-      key(c, false);
-    }
+    sendLine('ch ${codes.join(',')}');
   }
 
   /// Create (true) or destroy (false) the separate virtual keyboard device.

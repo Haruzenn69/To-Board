@@ -53,7 +53,7 @@ class _TouchpadSurfaceState extends State<TouchpadSurface> {
   static const _frameInterval = Duration(milliseconds: 33);
   static const _doubleTapWindow = Duration(milliseconds: 380);
   static const _dragLockDelay = Duration(milliseconds: 260);
-  static const _gestureThreshold = 60.0;
+  static const _gestureThreshold = 35.0;
   static const _palmLimit = 5; // >= this many simultaneous touches = palm
 
   /// Settings applied to synthetic gestures (cursor/scroll/multi-finger).
@@ -301,11 +301,15 @@ class _TouchpadSurfaceState extends State<TouchpadSurface> {
     // Palm: a flat hand on the pad contributes nothing.
     if (n >= _palmLimit) return;
 
-    // 3+ fingers: no cursor motion, no scroll — only multi-finger gestures.
-    if (n >= 3) {
+    // Multi-finger intent is set as soon as three fingers have touched this
+    // session: from then on ALL centroid travel feeds the gesture vector,
+    // even while a finger briefly lifts/lands mid-swipe (real swipes are
+    // rarely perfectly in lockstep). cursor/scroll stay muted throughout.
+    if (_sessionFingers >= 3) {
       if (_settings.multiFingerGestures && before != null && after != null) {
         _gestureAccum += after - before;
       }
+      _scrolling = false;
       return;
     }
 

@@ -219,13 +219,36 @@ void main() {
     await up(t, 2, const Offset(220, 320));
     await up(t, 3, const Offset(240, 320));
 
-    final keys = e.sent.where((l) => l.startsWith('k ')).toList();
-    expect(keys, [
-      'k 125 1', // Super down
-      'k 15 1', // Tab down
-      'k 15 0',
-      'k 125 0',
-    ]);
+    final chords = e.sent.where((l) => l.startsWith('ch ')).toList();
+    expect(chords, ['ch 125,15']);
+  });
+
+  testWidgets(
+      'three-finger swipe works even when a finger lands/lifts late',
+      (t) async {
+    final e = _FakeEngine();
+    await t.pumpWidget(MaterialApp(
+        home: Scaffold(body: TouchpadSurface(engine: e))));
+
+    await down(t, 1, const Offset(200, 400));
+    await down(t, 2, const Offset(220, 400));
+    // Second finger first, then the third joins already mid-motion.
+    await move(t, 1, const Offset(200, 360));
+    await move(t, 2, const Offset(220, 360));
+    await down(t, 3, const Offset(240, 360));
+    // All three move up; the third finger lifts before the swipe ends but
+    // the gesture vector keeps accumulating.
+    for (final y in <double>[330, 300, 270]) {
+      if (y == 270) await up(t, 3, const Offset(240, 270));
+      await move(t, 1, Offset(200, y));
+      await move(t, 2, Offset(220, y));
+    }
+    await up(t, 1, const Offset(200, 270));
+    await up(t, 2, const Offset(220, 270));
+
+    expect(e.sent.where((l) => l.startsWith('ch ')), contains('ch 125,15'));
+    expect(e.sent.where((l) => l.startsWith('m ')).any((l) => l != 'm 0.00 0.00'),
+        isFalse);
   });
 
   testWidgets('four-finger quick tap does nothing', (t) async {

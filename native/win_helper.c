@@ -11,6 +11,10 @@
  *   d  <dx> <dy>      discrete scroll delta (ints, in notches)
  *   q                 end current scroll gesture
  *   k  <key> <0|1>    keyboard key (evdev code passed through unchanged)
+ *   ch <k1,k2,...>    key chord burst (press all, release all in reverse,
+ *                     ~15ms apart) -- atomic, safe on lossy transports:
+ *                     if the line itself is lost nothing is injected and no
+ *                     key can ever stay stuck
  *   kb <0|1>          virtual keyboard on/off (no-op: we inject into the
  *                     session directly, there is no separate device)
  *   ping -> pong
@@ -56,8 +60,36 @@ static uint32_t held_btns = 0;
 static int held_keys[64];
 static int nheld_keys = 0;
 
+static DWORD last_cmd_ms = 0; /* GetTickCount() of last handled command */
+#define IDLE_RELEASE_MS 800   /* auto-release stuck non-modifier keys past this */
+
+/* Modifier keys are meant to be held long (user reaches for the next key),
+ * so the idle watchdog must never release them early, otherwise combos like
+ * Alt+Tab or Shift+a distant key (numbers, punctuation) silently drop the
+ * modifier -- seen live as Shift+/ typing "/" instead of "?". */
+static bool
+is_modifier(int key)
+{
+    switch (key) {
+    case 29:  /* Ctrl */
+    case 42:  /* Shift */
+    case 54:  /* R-Shift */
+    case 56:  /* Alt */
+    case 97:  /* R-Ctrl */
+    case 100: /* R-Alt */
+    case 125: /* Super */
+    case 126: /* R-Super */
+    case 58:  /* Caps */
+        return true;
+    default:
+        return false;
+    }
+}
+
 static double mouse_ax = 0, mouse_ay = 0; /* motion accumulator (subpixel) */
 static double scroll_sx = 0, scroll_sy = 0; /* scroll accumulator (px) */
+
+static void idle_release_keys(void); /* defined below with release guard */
 
 static bool use_sock = false;   /* replies/state go to the socket when true */
 static SOCKET out_sock = INVALID_SOCKET;
@@ -119,6 +151,16 @@ fill_source(void)
     int r;
     if (use_sock) {
         r = recv(out_sock, tmp, (int)sizeof tmp, 0);
+        if (r == SOCKET_ERROR) {
+            int err = WSAGetLastError();
+            if (err == WSAETIMEDOUT) {
+                /* Receive timeout (SO_RCVTIMEO): socket is idle, run the
+                 * held-key watchdog in case a key-up was dropped. */
+                idle_release_keys();
+                return true;
+            }
+            return false;
+        }
     } else {
         r = (int)_read(_fileno(stdin), tmp, (int)sizeof tmp);
     }
@@ -387,6 +429,52 @@ do_key(int key, bool press)
     }
 }
 
+/* Comma-separated evdev key chord, injected atomically on the daemon side:
+ * press every key (15ms apart) then release in reverse order. A single lost
+ * line can never leave a modifier stuck because key-up is bundled with it. */
+static void
+do_chord(const char *arg)
+{
+    int codes[16];
+    int n = 0;
+    const char *p = arg;
+    while (*p != '\0' && n < 16) {
+        const char *s = p;
+        while (*p >= '0' && *p <= '9')
+            p++;
+        if (p == s) {
+            reply("err bad-args");
+            return;
+        }
+        long v = 0;
+        for (; s < p; s++)
+            v = v * 10 + (*s - '0');
+        if (v <= 0 || v > 255) {
+            reply("err bad-args");
+            return;
+        }
+        codes[n++] = (int)v;
+        if (*p == ',')
+            p++;
+        else if (*p != '\0') {
+            reply("err bad-args");
+            return;
+        }
+    }
+    if (n == 0) {
+        reply("err bad-args");
+        return;
+    }
+    for (int i = 0; i < n; i++) {
+        do_key(codes[i], true);
+        Sleep(12);
+    }
+    for (int i = n - 1; i >= 0; i--) {
+        Sleep(12);
+        do_key(codes[i], false);
+    }
+}
+
 /* --------------------------------------------------------------- misc */
 
 static void
@@ -404,11 +492,37 @@ release_all(void)
     do_scroll_stop();
 }
 
+/* Safety net for lossy transports (adb reverse, flaky WiFi): if the socket
+ * has been idle while keyboard keys are recorded as held, a key-up packet was
+ * most likely dropped -- release them so Windows never sees a stuck key that
+ * would garble physical typing. Modifiers are exempt (see is_modifier): a user
+ * may legitimately hold Shift/Alt for a long pause while reaching for a key.
+ * Mouse buttons are exempt too (a deliberate long drag may stay idle). */
+static void
+idle_release_keys(void)
+{
+    if (nheld_keys == 0)
+        return;
+    if (GetTickCount() - last_cmd_ms < IDLE_RELEASE_MS)
+        return;
+    int released = 0;
+    for (int i = nheld_keys - 1; i >= 0; i--) {
+        if (is_modifier(held_keys[i]))
+            continue;
+        dlog("idle: releasing key %d", held_keys[i]);
+        do_key(held_keys[i], false); /* removes it from held_keys too */
+        released++;
+    }
+    if (released)
+        dlog("idle: released %d non-modifier key(s)", released);
+}
+
 /* ------------------------------------------------------------- commands */
 
 static void
 handle_line(char *line)
 {
+    last_cmd_ms = GetTickCount();
     dlog("recv: %s", line);
     if (strcmp(line, "ping") == 0) {
         reply("pong");
@@ -476,6 +590,10 @@ handle_line(char *line)
             do_key(key, st != 0);
         else
             reply("err bad-args");
+        return;
+    }
+    if (strncmp(line, "ch ", 3) == 0) {
+        do_chord(line + 3);
         return;
     }
     /* `t <n> ...` raw touch frames need a virtual touchpad device (uinput);
@@ -569,6 +687,11 @@ main(int argc, char **argv)
             }
             use_sock = true;
             out_sock = cs;
+            /* Poll the socket every 100ms so a dropped key-up heals quickly:
+             * on timeout fill_source() runs idle_release_keys(). */
+            int rcvtimeo = 100;
+            setsockopt(cs, SOL_SOCKET, SO_RCVTIMEO, (const char *)&rcvtimeo,
+                       sizeof rcvtimeo);
             reply("state ready backend=win32");
             serve();
             closesocket(cs);
