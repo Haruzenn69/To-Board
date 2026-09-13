@@ -1,4 +1,4 @@
-# touchpad
+# To-Board
 
 Turn a phone into a multitouch trackpad + laptop keyboard for your desktop.
 
